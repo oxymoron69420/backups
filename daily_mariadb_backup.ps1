@@ -1,11 +1,10 @@
 <#
 .SYNOPSIS
-  Full logical MariaDB backup via mysqldump,
-  organized by Year\Month folders, and uploaded to Azure using account key.
-  Accepts the database name via the -DatabaseName argument.
+  Full logical backup of multiple MariaDB databases via mysqldump,
+  organized by year/month folders and uploaded to Azure Blob Storage.
 
 .PARAMETER DatabaseName
-  The name of the database to back up (must exist).
+  Comma-separated list of DB names OR "*" to back up all
 #>
 
 param(
@@ -22,64 +21,75 @@ param(
 
 # ── Validate input ─────────────────────────────────────────────────────────────
 if (-not $DatabaseName) {
-  Write-Error "❌ Missing -DatabaseName argument." ; exit 1
+  Write-Error "❌ You must supply -DatabaseName (e.g. 'test' or 'test,mydb,*')." ; exit 1
 }
 
-# ── Load Az.Storage module ─────────────────────────────────────────────────────
+# ── Load Az.Storage ───────────────────────────────────────────────────────────
 if (-not (Get-Module -ListAvailable -Name Az.Storage)) {
   Install-Module Az.Storage -Scope CurrentUser -Force
 }
 Import-Module Az.Storage
 
-# ── Check database exists ──────────────────────────────────────────────────────
-$dbList = & $MySqlExe `
+# ── Fetch list of actual databases ────────────────────────────────────────────
+$available = & $MySqlExe `
   --user=$MySqlUser --password=$MySqlPassword `
   --batch --skip-column-names `
-  -e "SHOW DATABASES;"
-if ($dbList -notcontains $DatabaseName) {
-  Write-Error "❌ Database '$DatabaseName' does not exist." ; exit 1
-}
+  -e "SHOW DATABASES;" |
+  Where-Object { $_ -notin @("information_schema","performance_schema","mysql","sys") }
 
-# ── Build paths ────────────────────────────────────────────────────────────────
-$today         = Get-Date
-$yearDir       = Join-Path $LocalBaseDir $today.ToString("yyyy")
-$monthDir      = Join-Path $yearDir $today.ToString("MM")
-$backupName    = "${DatabaseName}_${today:yyyyMMdd}.bak"
-$backupPath    = Join-Path $monthDir $backupName
-
-foreach ($f in @($LocalBaseDir, $yearDir, $monthDir)) {
-  if (-not (Test-Path $f)) {
-    New-Item -ItemType Directory -Path $f | Out-Null
+if ($DatabaseName -eq "*") {
+  $targets = $available
+} else {
+  $targets = $DatabaseName.Split(",") | ForEach-Object { $_.Trim() }
+  $missing = $targets | Where-Object { $available -notcontains $_ }
+  if ($missing) {
+    Write-Error "❌ Invalid database(s): $($missing -join ", ")" ; exit 1
   }
 }
 
-# ── Dump the database ──────────────────────────────────────────────────────────
-Write-Host "`n🗃️  Dumping '$DatabaseName' to '$backupPath'" -ForegroundColor Cyan
-& $MySqlDumpExe `
-  --user=$MySqlUser `
-  --password=$MySqlPassword `
-  --single-transaction `
-  --routines `
-  --events `
-  $DatabaseName > $backupPath
-
-if (-not (Test-Path $backupPath)) {
-  Write-Error "❌ Backup failed—file not created." ; exit 1
+# ── Timestamp pieces ───────────────────────────────────────────────────────────
+$today      = Get-Date
+$year       = $today.ToString("yyyy")
+$month      = $today.ToString("MM")
+$stamp      = $today.ToString("yyyyMMdd")
+$yearFolder = Join-Path $LocalBaseDir $year
+$monthFolder= Join-Path $yearFolder $month
+foreach ($f in @($LocalBaseDir, $yearFolder, $monthFolder)) {
+  if (-not (Test-Path $f)) { New-Item -Path $f -ItemType Directory | Out-Null }
 }
-Write-Host "✔ Local backup created." -ForegroundColor Green
 
-# ── Upload to Azure ────────────────────────────────────────────────────────────
-Write-Host "`n📤 Uploading to Azure Storage..." -ForegroundColor Cyan
-$ctx = New-AzStorageContext `
-  -StorageAccountName $StorageAccount `
-  -StorageAccountKey  $StorageAccountKey
+# ── Backup each database ───────────────────────────────────────────────────────
+foreach ($db in $targets) {
+  $bakName = "${db}_${stamp}.bak"
+  $bakPath = Join-Path $monthFolder $bakName
 
-Set-AzStorageBlobContent `
-  -File      $backupPath `
-  -Container $ContainerName `
-  -Blob      $backupName `
-  -Context   $ctx `
-  -Force | Out-Null
+  Write-Host "`n🗃️  Backing up '$db' → '$bakPath'" -ForegroundColor Cyan
+  & $MySqlDumpExe `
+    --user=$MySqlUser `
+    --password=$MySqlPassword `
+    --single-transaction `
+    --routines `
+    --events `
+    $db > $bakPath
 
-Write-Host "`n✅ Backup & upload complete!" -ForegroundColor Green
-Write-Host "🔗 https://$StorageAccount.blob.core.windows.net/$ContainerName/$backupName`n"
+  if (-not (Test-Path $bakPath)) {
+    Write-Error "❌ Backup failed for '$db'. Skipping upload." ; continue
+  }
+
+  Write-Host "✔ Backup saved locally." -ForegroundColor Green
+
+  $ctx = New-AzStorageContext `
+    -StorageAccountName $StorageAccount `
+    -StorageAccountKey  $StorageAccountKey
+
+  Set-AzStorageBlobContent `
+    -File      $bakPath `
+    -Container $ContainerName `
+    -Blob      $bakName `
+    -Context   $ctx `
+    -Force | Out-Null
+
+  Write-Host "✅ Uploaded to Azure: https://${StorageAccount}.blob.core.windows.net/${ContainerName}/${bakName}" -ForegroundColor Green
+}
+
+Write-Host "`n🎉 All requested backups complete!`n"
