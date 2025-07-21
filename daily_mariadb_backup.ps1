@@ -13,7 +13,7 @@ param(
   [string]$CheckpointFile    = "$env:USERPROFILE\Backups\MariaDB\LastFullCheckpoint.json"
 )
 
-# ── Validate parameters ────────────────────────────────────────────────────────
+#  Validate parameters 
 if (-not $DatabaseName) {
   Write-Error "Missing -DatabaseName argument." ; exit 1
 }
@@ -21,13 +21,13 @@ if ($BackupType -notin @("full","diff")) {
   Write-Error "Invalid -BackupType. Use 'full' or 'diff'." ; exit 1
 }
 
-# ── Load Az.Storage ────────────────────────────────────────────────────────────
+#  Load Az.Storage 
 if (-not (Get-Module -ListAvailable -Name Az.Storage)) {
   Install-Module Az.Storage -Scope CurrentUser -Force
 }
 Import-Module Az.Storage
 
-# ── Fetch available DBs ────────────────────────────────────────────────────────
+#  Fetch available DBs 
 $available = & $MySqlExe `
   --user=$MySqlUser `
   --password=$MySqlPassword `
@@ -35,7 +35,7 @@ $available = & $MySqlExe `
   -e "SHOW DATABASES;" |
   Where-Object { $_ -notin @("information_schema","performance_schema","mysql","sys") }
 
-# ── Resolve target DBs ─────────────────────────────────────────────────────────
+#  Resolve target DBs ─
 if ($DatabaseName -eq "*") {
   $targets = $available
 } else {
@@ -46,7 +46,7 @@ if ($DatabaseName -eq "*") {
   }
 }
 
-# ── Prepare folders ────────────────────────────────────────────────────────────
+#  Prepare folders 
 $now     = Get-Date
 $year    = $now.ToString("yyyy")
 $month   = $now.ToString("MM")
@@ -58,7 +58,7 @@ foreach ($dir in @($LocalBaseDir, $baseDir, $monthDir)) {
   if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory | Out-Null }
 }
 
-# ── Load or Save Checkpoint ────────────────────────────────────────────────────
+#  Load or Save Checkpoint 
 if ($BackupType -eq "full") {
   @{ LastFull = $now.ToString("o") } | ConvertTo-Json | Set-Content $CheckpointFile
 } elseif ($BackupType -eq "diff") {
@@ -69,13 +69,13 @@ if ($BackupType -eq "full") {
   $cutoff  = [DateTime]::Parse($chkTime.LastFull)
 }
 
-# ── Run backup for each DB ─────────────────────────────────────────────────────
+#  Run backup for each DB ─
 foreach ($db in $targets) {
   $bakName = "${db}_${stamp}_${BackupType}.bak"
   $bakPath = Join-Path $monthDir $bakName
 
   if ($BackupType -eq "full") {
-    Write-Host "Full backup of '$db' → $bakPath" -ForegroundColor Cyan
+    Write-Host "`Full backup of '$db' → $bakPath" -ForegroundColor Cyan
     & $MySqlDumpExe `
       --user=$MySqlUser `
       --password=$MySqlPassword `
@@ -86,7 +86,7 @@ foreach ($db in $targets) {
 
   } else {
     $cutoffStr = $cutoff.ToString("yyyy-MM-dd HH:mm:ss")
-    Write-Host "Differential backup of '$db' since $cutoffStr using '$TimestampColumn'" -ForegroundColor Cyan
+    Write-Host "`Differential backup of '$db' since $cutoffStr using '$TimestampColumn'" -ForegroundColor Cyan
     & $MySqlDumpExe `
       --user=$MySqlUser `
       --password=$MySqlPassword `
@@ -113,4 +113,4 @@ foreach ($db in $targets) {
   Write-Host "Uploaded: https://$StorageAccount.blob.core.windows.net/$ContainerName/$bakName`n"
 }
 
-Write-Host "All requested backups are complete!" -ForegroundColor Green
+Write-Host "`All requested backups are complete!" -ForegroundColor Green
